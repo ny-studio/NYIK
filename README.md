@@ -119,10 +119,6 @@ No Play mode required.
 - [ ] Look-at solver
 - [ ] Sample scenes
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
-
 ## License
 
 [MIT](LICENSE.md) - Copyright (c) 2026 NYStudio
