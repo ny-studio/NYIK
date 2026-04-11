@@ -1,0 +1,19 @@
+{
+    "name": "NYIK.Runtime",
+    "rootNamespace": "NYIK",
+    "references": [
+        "Unity.XR.CoreUtils",
+        "Unity.InputSystem",
+        "Unity.XR.Interaction.Toolkit",
+        "Unity.Mathematics"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

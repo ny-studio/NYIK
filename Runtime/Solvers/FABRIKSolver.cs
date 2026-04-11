@@ -1,0 +1,214 @@
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+using NYIK.Core;
+
+namespace NYIK.Solvers
+{
+    /// <summary>
+    /// FABRIK (Forward And Backward Reaching IK) solver.
+    /// A position-based iterative solver that supports variable-length bone chains.
+    /// Ideal for multi-joint chains such as spines and tails.
+    /// Iterates forward/backward reaching passes to find positions satisfying
+    /// inter-bone distance constraints.
+    /// </summary>
+    [Serializable]
+    public class FABRIKSolver : IKSolverBase
+    {
+        IKChain m_Chain;
+
+        Vector3 m_TargetPosition;
+        Quaternion m_TargetRotation = Quaternion.identity;
+        float m_RotationWeight = 1f;
+
+        float[] m_BoneLengths;
+        Vector3[] m_Positions;
+        float[] m_BoneWeights;
+        Vector3[] m_InitialBoneDirs;
+
+        /// <summary>
+        /// IK target position (the goal the end of the chain should reach).
+        /// </summary>
+        public Vector3 TargetPosition
+        {
+            get => m_TargetPosition;
+            set => m_TargetPosition = value;
+        }
+
+        /// <summary>
+        /// IK target rotation.
+        /// </summary>
+        public Quaternion TargetRotation
+        {
+            get => m_TargetRotation;
+            set => m_TargetRotation = value;
+        }
+
+        /// <summary>
+        /// Weight for applying the target rotation.
+        /// </summary>
+        public float RotationWeight
+        {
+            get => m_RotationWeight;
+            set => m_RotationWeight = Mathf.Clamp01(value);
+        }
+
+        public IKChain Chain => m_Chain;
+
+        public void SetChain(IKChain chain)
+        {
+            m_Chain = chain;
+        }
+
+        /// <summary>
+        /// Sets per-bone weight array. Used to suppress excessive movement of
+        /// short bones (e.g. cervical vertebrae). Array length must match the
+        /// number of bones in the chain.
+        /// </summary>
+        public void SetBoneWeights(float[] weights)
+        {
+            m_BoneWeights = weights;
+        }
+
+        public override bool IsValid()
+        {
+            return m_Chain != null && m_Chain.IsValid();
+        }
+
+        public override List<string> GetWarnings()
+        {
+            var warnings = new List<string>();
+            if (m_Chain == null) warnings.Add("Chain is not assigned.");
+            else if (!m_Chain.IsValid()) warnings.Add("Chain contains invalid bone references.");
+            return warnings;
+        }
+
+        protected override void OnInitialize(Transform root)
+        {
+            if (!IsValid())
+                return;
+
+            m_Chain.Initialize();
+
+            int count = m_Chain.BoneCount;
+            m_BoneLengths = new float[count];
+            m_Positions = new Vector3[count];
+
+            for (int i = 0; i < count; i++)
+                m_BoneLengths[i] = m_Chain.Bones[i].Length;
+
+            // Default bone weights (uniform)
+            if (m_BoneWeights == null || m_BoneWeights.Length != count)
+            {
+                m_BoneWeights = new float[count];
+                for (int i = 0; i < count; i++)
+                    m_BoneWeights[i] = 1f;
+            }
+
+            // Cache initial inter-bone directions in local space
+            var bones = m_Chain.Bones;
+            int dirCount = count - 1;
+            m_InitialBoneDirs = new Vector3[dirCount];
+            for (int i = 0; i < dirCount; i++)
+            {
+                Vector3 worldDir = (bones[i + 1].Position - bones[i].Position).normalized;
+                m_InitialBoneDirs[i] = Quaternion.Inverse(bones[i].Rotation) * worldDir;
+            }
+        }
+
+        protected override void OnSolve()
+        {
+            int count = m_Chain.BoneCount;
+            var bones = m_Chain.Bones;
+
+            // Copy current bone positions
+            for (int i = 0; i < count; i++)
+                m_Positions[i] = bones[i].Position;
+
+            Vector3 rootPosition = m_Positions[0];
+
+            // If the target is beyond reachable distance, stretch bones in a straight line
+            float totalLength = m_Chain.TotalLength;
+            float distToTarget = Vector3.Distance(rootPosition, m_TargetPosition);
+
+            if (distToTarget > totalLength)
+            {
+                // Unreachable: align all bones in a straight line toward the target
+                Vector3 diff = m_TargetPosition - rootPosition;
+                Vector3 direction = diff.sqrMagnitude > 0f ? diff.normalized : Vector3.up;
+                for (int i = 1; i < count; i++)
+                    m_Positions[i] = m_Positions[i - 1] + direction * m_BoneLengths[i - 1];
+            }
+            else
+            {
+                // FABRIK iteration
+                for (int iteration = 0; iteration < MaxIterations; iteration++)
+                {
+                    // Convergence check
+                    float endEffectorError = Vector3.Distance(m_Positions[count - 1], m_TargetPosition);
+                    if (endEffectorError <= Tolerance)
+                        break;
+
+                    // Forward reaching (end effector -> root)
+                    m_Positions[count - 1] = m_TargetPosition;
+                    for (int i = count - 2; i >= 0; i--)
+                    {
+                        Vector3 diff = m_Positions[i] - m_Positions[i + 1];
+                        Vector3 dir = diff.sqrMagnitude > 0f ? diff.normalized : Vector3.up;
+                        float len = m_BoneLengths[i];
+                        m_Positions[i] = m_Positions[i + 1] + dir * len;
+                    }
+
+                    // Backward reaching (root -> end effector)
+                    m_Positions[0] = rootPosition;
+                    for (int i = 1; i < count; i++)
+                    {
+                        Vector3 diff = m_Positions[i] - m_Positions[i - 1];
+                        Vector3 dir = diff.sqrMagnitude > 0f ? diff.normalized : Vector3.up;
+                        float len = m_BoneLengths[i - 1];
+                        m_Positions[i] = m_Positions[i - 1] + dir * len;
+                    }
+                }
+            }
+
+            // Apply bone weights and solver weight to update positions
+            for (int i = 0; i < count; i++)
+            {
+                float boneWeight = m_BoneWeights[i] * Weight;
+                Vector3 targetPos = m_Positions[i];
+                bones[i].Position = Vector3.Lerp(bones[i].Position, targetPos, boneWeight);
+            }
+
+            // Derive bone rotations from FABRIK-computed positions.
+            // Using m_Positions[] avoids child position drift caused by parent rotation changes.
+            for (int i = 0; i < count - 1; i++)
+            {
+                Vector3 desiredDir = m_Positions[i + 1] - m_Positions[i];
+                if (desiredDir.sqrMagnitude < 0.0001f)
+                    continue;
+
+                // Transform the cached local direction to world space using the current rotation
+                Vector3 currentBoneDir = bones[i].Rotation * m_InitialBoneDirs[i];
+
+                Quaternion correction = Quaternion.FromToRotation(currentBoneDir, desiredDir.normalized);
+                float boneWeight = m_BoneWeights[i] * Weight;
+                bones[i].Rotation = Quaternion.Slerp(
+                    bones[i].Rotation,
+                    correction * bones[i].Rotation,
+                    boneWeight
+                );
+            }
+
+            // Apply target rotation to the end effector bone
+            if (m_RotationWeight > 0f)
+            {
+                var lastBone = bones[count - 1];
+                lastBone.Rotation = Quaternion.Slerp(
+                    lastBone.Rotation,
+                    m_TargetRotation,
+                    m_RotationWeight * Weight
+                );
+            }
+        }
+    }
+}
