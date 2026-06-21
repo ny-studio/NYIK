@@ -641,7 +641,11 @@ namespace NYIK.Humanoid
                 var bone = FBTCalibrator.GetBoneForSlot(slot.Kind);
                 if (!bone.HasValue) continue;
                 if (m_FrameTargets.ContainsKey(bone.Value)) continue;
-                m_FrameTargets[bone.Value] = BoneTarget.Tracked(slot.Source.position, slot.CalibratedRotation);
+                // 位置も回転と同様にキャリブ済み値を使う。生 Source.position は T-pose で学習した
+                // CalibrationPosOffset（トラッカー実装位置↔ボーン位置のオフセット）を無視し、特に
+                // Waist→Hips 駆動で骨盤が数 cm ずれていた。CalibratedPosition は offset 適用＋
+                // OneEuro フィルタ済み effective 値も尊重（CalibratedRotation と整合）。
+                m_FrameTargets[bone.Value] = BoneTarget.Tracked(slot.CalibratedPosition, slot.CalibratedRotation);
             }
         }
 
