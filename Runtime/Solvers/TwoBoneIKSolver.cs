@@ -256,15 +256,31 @@ namespace NYIK.Solvers
         /// </summary>
         Vector3 CalculateMidPosition(Vector3 rootPos, Vector3 targetDir, float targetDist)
         {
-            float cosRootAngle = (targetDist * targetDist + m_UpperLength * m_UpperLength - m_LowerLength * m_LowerLength)
-                / (2f * targetDist * m_UpperLength);
+            Vector3 bendDir = GetStableBendDirection(rootPos, targetDir);
+            return SolveMidPosition(rootPos, targetDir, targetDist, m_UpperLength, m_LowerLength, bendDir);
+        }
+
+        /// <summary>
+        /// 二骨IKの中間関節ワールド位置を余弦定理で解く純関数。
+        /// root-mid=upperLen / mid-target=lowerLen / root-target=targetDist の三角形を、
+        /// targetDir 軸（root→target 単位ベクトル）と bendDir（targetDir に直交する曲げ方向）が
+        /// 張る平面上に構成する。正しさの不変条件:
+        ///   ・|結果 - rootPos| == upperLen（上骨長を厳密に保存）
+        ///   ・|結果 - (rootPos + targetDir*targetDist)| == lowerLen（下骨が target に届く）
+        /// targetDist は [|upper-lower|, upper+lower] 内・>0、bendDir は単位かつ targetDir に直交、を呼び側が保証。
+        /// 純関数＝ヘッドレス特性化テスト可能。
+        /// </summary>
+        public static Vector3 SolveMidPosition(Vector3 rootPos, Vector3 targetDir, float targetDist,
+                                               float upperLen, float lowerLen, Vector3 bendDir)
+        {
+            float cosRootAngle = (targetDist * targetDist + upperLen * upperLen - lowerLen * lowerLen)
+                / (2f * targetDist * upperLen);
             cosRootAngle = Mathf.Clamp(cosRootAngle, -1f, 1f);
             float rootAngle = Mathf.Acos(cosRootAngle);
 
-            float along = Mathf.Cos(rootAngle) * m_UpperLength;
-            float perp = Mathf.Sin(rootAngle) * m_UpperLength;
+            float along = Mathf.Cos(rootAngle) * upperLen;
+            float perp = Mathf.Sin(rootAngle) * upperLen;
 
-            Vector3 bendDir = GetStableBendDirection(rootPos, targetDir);
             return rootPos + targetDir * along + bendDir * perp;
         }
 

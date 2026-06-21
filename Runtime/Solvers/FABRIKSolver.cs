@@ -173,6 +173,38 @@ namespace NYIK.Solvers
             }
         }
 
+        /// <summary>
+        /// FABRIK 前方リーチの純関数（end effector → root）。`positions[last]` を target に固定し、
+        /// 各ボーン長 `boneLengths[i] = |pos[i]→pos[i+1]|` を保ったまま内側へ手繰る。退化（点が一致）時は
+        /// Vector3.up にフォールバックして NaN を出さない。`positions` を in-place 更新＝ヘッドレステスト可能。
+        /// </summary>
+        public static void ForwardReach(Vector3[] positions, float[] boneLengths, Vector3 target)
+        {
+            int count = positions.Length;
+            positions[count - 1] = target;
+            for (int i = count - 2; i >= 0; i--)
+            {
+                Vector3 diff = positions[i] - positions[i + 1];
+                Vector3 dir = diff.sqrMagnitude > 0f ? diff.normalized : Vector3.up;
+                positions[i] = positions[i + 1] + dir * boneLengths[i];
+            }
+        }
+
+        /// <summary>
+        /// FABRIK 後方リーチの純関数（root → end effector）。`positions[0]` を rootPos に固定し、
+        /// 各ボーン長を保ったまま外側へ手繰る。退化時は Vector3.up フォールバック。in-place 更新。
+        /// </summary>
+        public static void BackwardReach(Vector3[] positions, float[] boneLengths, Vector3 rootPos)
+        {
+            positions[0] = rootPos;
+            for (int i = 1; i < positions.Length; i++)
+            {
+                Vector3 diff = positions[i] - positions[i - 1];
+                Vector3 dir = diff.sqrMagnitude > 0f ? diff.normalized : Vector3.up;
+                positions[i] = positions[i - 1] + dir * boneLengths[i - 1];
+            }
+        }
+
         protected override void OnSolve()
         {
             int count = m_Chain.BoneCount;
@@ -206,25 +238,9 @@ namespace NYIK.Solvers
                     if (endEffectorError <= Tolerance)
                         break;
 
-                    // Forward reaching (end effector -> root)
-                    m_Positions[count - 1] = m_TargetPosition;
-                    for (int i = count - 2; i >= 0; i--)
-                    {
-                        Vector3 diff = m_Positions[i] - m_Positions[i + 1];
-                        Vector3 dir = diff.sqrMagnitude > 0f ? diff.normalized : Vector3.up;
-                        float len = m_BoneLengths[i];
-                        m_Positions[i] = m_Positions[i + 1] + dir * len;
-                    }
-
-                    // Backward reaching (root -> end effector)
-                    m_Positions[0] = rootPosition;
-                    for (int i = 1; i < count; i++)
-                    {
-                        Vector3 diff = m_Positions[i] - m_Positions[i - 1];
-                        Vector3 dir = diff.sqrMagnitude > 0f ? diff.normalized : Vector3.up;
-                        float len = m_BoneLengths[i - 1];
-                        m_Positions[i] = m_Positions[i - 1] + dir * len;
-                    }
+                    // Forward reaching (end effector → root) then backward (root → end effector)
+                    ForwardReach(m_Positions, m_BoneLengths, m_TargetPosition);
+                    BackwardReach(m_Positions, m_BoneLengths, rootPosition);
 
                     // Constraint pass — projects any joint outside its swing
                     // cone back to the cone surface. Allows the next iteration
