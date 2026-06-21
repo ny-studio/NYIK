@@ -13,8 +13,13 @@ namespace NYIK.Humanoid
     public class ArmSolver
     {
         [SerializeField, Range(0f, 1f)] float m_Weight = 1f;
-        [SerializeField, Range(0f, 1f)] float m_ShoulderRotationWeight = 0.5f;
-        [SerializeField] float m_ShoulderReachDistance = 0.1f;
+        // VRChat/VRIK 既定の肩回転は強め(1.0)。NYIK は 0.5 だったが、肘を曲げて寄る姿勢で
+        // 肩を効かせるため 0.8 を新既定に（既存シーンのシリアライズ値は Inspector 側で要調整）。
+        [SerializeField, Range(0f, 1f)] float m_ShoulderRotationWeight = 0.8f;
+        [Tooltip("肩が寄与し始める reach 比率(下限)。reachRatio がこの値→1.0 にかけて肩が連続ランプイン。" +
+                 "小さいほど早く効く。旧実装はこれを上端デッドゾーン幅として使い、手が腕長の ~90% を超えるまで" +
+                 "肩を完全に殺していた（VRChat/VRIK は全 reach 域で連続回転）。")]
+        [SerializeField] float m_ShoulderReachDistance = 0.2f;
 
         TwoBoneIKSolver m_IKSolver = new TwoBoneIKSolver();
         BoneTransform m_Shoulder;
@@ -153,6 +158,13 @@ namespace NYIK.Humanoid
             m_Initialized = true;
         }
 
+        /// <summary>
+        /// Frame delta forwarded to the inner TwoBoneIKSolver for time-aware
+        /// smoothing (bend-normal filter). Settable so editor / test code can
+        /// drive the solver deterministically.
+        /// </summary>
+        public float DeltaTime { get; set; } = 1f / 90f;
+
         public void Solve()
         {
             if (!m_Initialized || m_Weight <= 0f)
@@ -180,6 +192,7 @@ namespace NYIK.Humanoid
 
             // Set offset-applied rotation just before Solve, then restore immediately after
             m_IKSolver.TargetRotation = adjustedRotation;
+            m_IKSolver.DeltaTime = DeltaTime;
             m_IKSolver.Solve();
             m_IKSolver.TargetRotation = originalTargetRotation;
         }
@@ -215,7 +228,10 @@ namespace NYIK.Humanoid
             float distToTarget = toTarget.magnitude;
 
             float reachRatio = m_ArmLength > 0f ? distToTarget / m_ArmLength : 0f;
-            float shoulderActivation = Mathf.Clamp01((reachRatio - (1f - m_ShoulderReachDistance)) / m_ShoulderReachDistance);
+            // VRChat/VRIK 整合: m_ShoulderReachDistance(下限 reach)→1.0 にかけて肩を連続ランプイン。
+            // 旧式は reach=0.1 だと ~90% reach まで肩が無効で、肘を曲げて寄る姿勢で肩が死んでいた。
+            // 純関数 ShoulderActivation に切り出してヘッドレステスト可能にした。
+            float shoulderActivation = ShoulderActivation(reachRatio, m_ShoulderReachDistance);
 
             if (shoulderActivation <= 0f)
                 return;
@@ -233,6 +249,14 @@ namespace NYIK.Humanoid
                 );
             }
         }
+
+        /// <summary>
+        /// 肩の連続アクティベーション（VRChat/VRIK 整合）。reachStart..1.0 にかけて 0→1 にランプ。
+        /// reachStart は「肩が寄与し始める reach 比率(下限)」。旧実装の上端デッドゾーンと違い、
+        /// 中間 reach（肘を曲げて寄る姿勢）でも肩が連続的に効く。純関数＝ヘッドレステスト可能。
+        /// </summary>
+        public static float ShoulderActivation(float reachRatio, float reachStart)
+            => Mathf.Clamp01(Mathf.InverseLerp(reachStart, 1f, reachRatio));
 
         public bool IsValid()
         {

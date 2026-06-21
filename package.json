@@ -1,31 +1,32 @@
 {
-    "name": "com.nystudio.nyik",
-    "version": "0.1.0",
-    "displayName": "NYIK - Humanoid IK for VR",
-    "description": "Open-source humanoid IK system for VR. Zero-config full-body IK with HMD + 2 controllers. Drop-in alternative to FinalIK's VRIK.",
-    "unity": "2022.3",
-    "unityRelease": "0f1",
-    "dependencies": {
-        "com.unity.xr.core-utils": "2.2.0",
-        "com.unity.inputsystem": "1.7.0",
-        "com.unity.xr.interaction.toolkit": "2.5.0",
-        "com.unity.mathematics": "1.2.6"
-    },
-    "keywords": [
-        "ik",
-        "inverse-kinematics",
-        "vr",
-        "humanoid",
-        "full-body",
-        "vrik",
-        "xr"
-    ],
-    "author": {
-        "name": "NYStudio"
-    },
-    "license": "MIT",
-    "repository": {
-        "type": "git",
-        "url": "https://github.com/ny-studio/NYIK.git"
-    }
+  "name": "com.nystudio.nyik",
+  "version": "0.1.0",
+  "displayName": "NYIK - Humanoid IK for VR",
+  "description": "Open-source humanoid IK system for VR. Zero-config full-body IK with HMD + 2 controllers. Drop-in alternative to FinalIK's VRIK.",
+  "unity": "2022.3",
+  "unityRelease": "0f1",
+  "dependencies": {
+    "com.unity.xr.core-utils": "2.2.0",
+    "com.unity.inputsystem": "1.7.0",
+    "com.unity.xr.interaction.toolkit": "2.5.0",
+    "com.unity.mathematics": "1.2.6"
+  },
+  "keywords": [
+    "ik",
+    "inverse-kinematics",
+    "vr",
+    "humanoid",
+    "full-body",
+    "vrik",
+    "xr"
+  ],
+  "author": {
+    "name": "NYStudio"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ny-studio/NYIK.git"
+  },
+  "_fingerprint": "f50167d721e7f123b038b73099936acc9e0fcfd6"
 }

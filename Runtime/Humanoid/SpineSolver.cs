@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using NYIK.Solvers;
 
 namespace NYIK.Humanoid
 {
@@ -16,6 +17,20 @@ namespace NYIK.Humanoid
         [SerializeField, Range(0f, 1f)] float m_Weight = 1f;
         [SerializeField, Range(0f, 1f)] float m_TwistWeight = 0.5f;
         [SerializeField, Range(0f, 1f)] float m_BodyTurnWeight = 0.7f;
+
+        [Header("Solver Method")]
+        [Tooltip("Use FABRIK chain (constrained) instead of static weight-distribution. " +
+                 "FABRIK converges to the head target geometrically and applies a swing-cone " +
+                 "constraint per spine joint each iteration. Eliminates the 'residual correction' " +
+                 "hack and gives cleaner spine bending for complex poses.")]
+        [SerializeField] bool m_UseFABRIK = true;
+        [SerializeField, Range(1, 5)] int m_FABRIKIterations = 3;
+        [Tooltip("Per-spine-joint swing cone half-angle (degrees) used by Constrained FABRIK.")]
+        [SerializeField, Range(5f, 60f)] float m_PerJointSwingMaxDeg = 25f;
+
+        // Scratch buffers for FABRIK to avoid per-frame allocations
+        Vector3[] m_FABRIKPositions;
+        float[] m_FABRIKLengths;
 
         PelvisEstimator m_PelvisEstimator = new PelvisEstimator();
 
@@ -165,7 +180,7 @@ namespace NYIK.Humanoid
         /// Rotates the pelvis bone in yaw toward the head direction.
         /// Called after pelvis position is set but before spine bend distribution.
         /// </summary>
-        void ApplyPelvisYaw(Vector3 headTargetPosition, Quaternion headTargetRotation)
+        void ApplyPelvisYaw(Vector3 headTargetPosition, Quaternion headTargetRotation, float deltaTime)
         {
             if (m_Root == null || m_Pelvis == null || m_BodyTurnWeight <= 0f)
             {
@@ -197,7 +212,7 @@ namespace NYIK.Humanoid
             float targetYaw = yawAngle * m_BodyTurnWeight;
 
             // Frame-rate independent exponential smoothing to prevent snapping
-            float dt = Time.deltaTime;
+            float dt = deltaTime;
             if (dt > 0f)
             {
                 float alpha = 1f - Mathf.Exp(-dt / k_PelvisYawSmoothTime);
@@ -219,7 +234,7 @@ namespace NYIK.Humanoid
         /// </summary>
         /// <param name="headTargetPosition">Head target position from HMD</param>
         /// <param name="headTargetRotation">Head target rotation from HMD</param>
-        public void Solve(Vector3 headTargetPosition, Quaternion headTargetRotation)
+        public void Solve(Vector3 headTargetPosition, Quaternion headTargetRotation, float deltaTime)
         {
             if (!m_Initialized || m_Weight <= 0f)
                 return;
@@ -250,9 +265,18 @@ namespace NYIK.Humanoid
                 m_Pelvis.position = pelvisPos;
 
             // 3.5. Apply pelvis yaw rotation toward head direction
-            ApplyPelvisYaw(headTargetPosition, headTargetRotation);
+            ApplyPelvisYaw(headTargetPosition, headTargetRotation, deltaTime);
 
-            // 4. Distribute spine bend from root to tip.
+            // 4. Bend distribution — FABRIK chain (Aristidou & Lasenby 2017) or
+            // legacy static-weight rotation distribution.
+            if (m_UseFABRIK)
+            {
+                SolveSpineFABRIK(headTargetPosition);
+                ApplyFinalHeadRotation(headTargetRotation);
+                return;
+            }
+
+            // 4. (legacy) Distribute spine bend from root to tip.
             //    Each bone absorbs a weighted fraction of the rotation from its position
             //    toward the head target.
             int lastValidIndex = -1;
@@ -309,8 +333,116 @@ namespace NYIK.Humanoid
                 DistributeSpineTwist(headTargetPosition, headTargetRotation);
 
             // 7. Apply HMD rotation to head with offset
+            ApplyFinalHeadRotation(headTargetRotation);
+        }
+
+        void ApplyFinalHeadRotation(Quaternion headTargetRotation)
+        {
             Quaternion targetHeadRotation = headTargetRotation * m_HeadRotationOffset;
             m_Head.rotation = Quaternion.Slerp(m_Head.rotation, targetHeadRotation, m_Weight);
+        }
+
+        /// <summary>
+        /// Position-based spine solve via Constrained FABRIK
+        /// (Aristidou & Lasenby 2017). Builds a chain Pelvis→Spine[0..N]→Head,
+        /// iterates forward+backward reaching, then projects each joint
+        /// direction into a swing cone around its rest pose. Bone rotations
+        /// are derived from the resulting position chain via FromToRotation.
+        /// </summary>
+        void SolveSpineFABRIK(Vector3 headTargetPosition)
+        {
+            int spineCount = m_SpineBones?.Length ?? 0;
+            if (spineCount == 0 || m_Pelvis == null || m_Head == null) return;
+            int total = 1 + spineCount + 1;
+
+            if (m_FABRIKPositions == null || m_FABRIKPositions.Length != total)
+            {
+                m_FABRIKPositions = new Vector3[total];
+                m_FABRIKLengths = new float[total - 1];
+            }
+
+            // Seed positions from current world pose.
+            m_FABRIKPositions[0] = m_Pelvis.position;
+            for (int i = 0; i < spineCount; i++)
+                m_FABRIKPositions[i + 1] = m_SpineBones[i].position;
+            m_FABRIKPositions[total - 1] = m_Head.position;
+
+            // Lock bone lengths from this initial snapshot.
+            for (int i = 0; i < total - 1; i++)
+                m_FABRIKLengths[i] = Vector3.Distance(m_FABRIKPositions[i], m_FABRIKPositions[i + 1]);
+
+            Vector3 rootPos = m_FABRIKPositions[0];
+            float maxSwingRad = m_PerJointSwingMaxDeg * Mathf.Deg2Rad;
+
+            for (int iter = 0; iter < m_FABRIKIterations; iter++)
+            {
+                // Forward reach (head → pelvis)
+                m_FABRIKPositions[total - 1] = headTargetPosition;
+                for (int i = total - 2; i >= 0; i--)
+                {
+                    Vector3 diff = m_FABRIKPositions[i] - m_FABRIKPositions[i + 1];
+                    Vector3 dir = diff.sqrMagnitude > 1e-8f ? diff.normalized : Vector3.up;
+                    m_FABRIKPositions[i] = m_FABRIKPositions[i + 1] + dir * m_FABRIKLengths[i];
+                }
+                // Backward reach (pelvis → head)
+                m_FABRIKPositions[0] = rootPos;
+                for (int i = 1; i < total; i++)
+                {
+                    Vector3 diff = m_FABRIKPositions[i] - m_FABRIKPositions[i - 1];
+                    Vector3 dir = diff.sqrMagnitude > 1e-8f ? diff.normalized : Vector3.up;
+                    m_FABRIKPositions[i] = m_FABRIKPositions[i - 1] + dir * m_FABRIKLengths[i - 1];
+                }
+
+                // Cone constraint each joint: limit per-joint deviation from the PARENT
+                // segment direction (rest-relative), not from world up. 旧実装は各セグメントを
+                // world up 基準でクランプしたため、背骨ほぼ水平の屈み姿勢(マッサージ師が台に屈む)が
+                // 毎フレーム垂直へ戻される実バグだった。親基準なら各関節が少しずつ曲がり、
+                // 累積で背中を水平近くまで倒せる(根 i=0 のみ up を錨に残す)。
+                for (int i = 0; i < total - 1; i++)
+                {
+                    Vector3 dir = m_FABRIKPositions[i + 1] - m_FABRIKPositions[i];
+                    if (dir.sqrMagnitude < 1e-8f) continue;
+                    Vector3 reference = Vector3.up;
+                    if (i > 0)
+                    {
+                        Vector3 parent = m_FABRIKPositions[i] - m_FABRIKPositions[i - 1];
+                        if (parent.sqrMagnitude > 1e-8f) reference = parent;
+                    }
+                    Vector3 clamped = ConeClamp(dir, reference, m_PerJointSwingMaxDeg);
+                    m_FABRIKPositions[i + 1] = m_FABRIKPositions[i] + clamped * m_FABRIKLengths[i];
+                }
+            }
+
+            // Derive bone rotations from the new position chain.
+            for (int i = 0; i < spineCount; i++)
+            {
+                Vector3 desired = m_FABRIKPositions[i + 2] - m_FABRIKPositions[i + 1];
+                if (desired.sqrMagnitude < 1e-8f) continue;
+                Vector3 childWorldPos = i + 1 < spineCount ? m_SpineBones[i + 1].position : m_Head.position;
+                Vector3 current = childWorldPos - m_SpineBones[i].position;
+                if (current.sqrMagnitude < 1e-8f) continue;
+
+                Quaternion correction = QuaternionMath.FromToRotationStable(current, desired);
+                m_SpineBones[i].rotation = Quaternion.Slerp(
+                    m_SpineBones[i].rotation,
+                    correction * m_SpineBones[i].rotation,
+                    m_Weight);
+            }
+        }
+
+        /// <summary>
+        /// 方向 dir を、参照方向 reference を中心とする半角 maxAngleDeg の円錐内へクランプする純関数。
+        /// reference を rest(親セグメント)方向にすると、世界の垂直でなく「親に対する曲がり」を制限でき、
+        /// 背骨が屈み姿勢で垂直へ戻されない。ヘッドレス特性化テスト可能。
+        /// </summary>
+        public static Vector3 ConeClamp(Vector3 dir, Vector3 reference, float maxAngleDeg)
+        {
+            if (dir.sqrMagnitude < 1e-8f || reference.sqrMagnitude < 1e-8f) return dir;
+            dir = dir.normalized;
+            reference = reference.normalized;
+            float angle = Vector3.Angle(dir, reference);
+            if (angle <= maxAngleDeg) return dir;
+            return Vector3.Slerp(reference, dir, maxAngleDeg / angle).normalized;
         }
 
         /// <summary>

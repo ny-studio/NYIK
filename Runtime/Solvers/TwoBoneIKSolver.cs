@@ -6,9 +6,22 @@ using NYIK.Core;
 namespace NYIK.Solvers
 {
     /// <summary>
-    /// Analytical two-bone IK solver. Used for arms (upper arm -> forearm -> wrist)
-    /// and legs (thigh -> shin -> ankle).
-    /// Uses the same algorithm as Unity Animation Rigging, resolving all bone rotations in a single pass.
+    /// Analytical two-bone IK solver. Used for arms (upper arm → forearm → wrist)
+    /// and legs (thigh → shin → ankle).
+    ///
+    /// Algorithm:
+    ///   1. Snapshot original local rotations.
+    ///   2. Compute mid joint world position via Law of Cosines + stable bend
+    ///      direction (BendGoal or previous-frame normal).
+    ///   3. Apply full-strength rotations to root + mid + tip in sequence.
+    ///   4. Restore tip twist (rotation around hand-forward axis) so wrist
+    ///      orientation is preserved across solves — without this, the user's
+    ///      controller twist gets erased by the IK.
+    ///   5. Slerp from original rotations to solved rotations with Weight.
+    ///      This avoids the order-dependent partial-strength artefact of
+    ///      slerping each bone in sequence.
+    ///   6. Use numerically stable Quaternion.FromToRotation so near-180°
+    ///      target alignments don't flip-flop.
     /// </summary>
     [Serializable]
     public class TwoBoneIKSolver : IKSolverBase
@@ -38,6 +51,21 @@ namespace NYIK.Solvers
         // Previous frame bend normal for stabilization
         Vector3 m_PrevBendNormal;
         bool m_HasPrevBendNormal;
+
+        /// <summary>
+        /// When true, the tip's local twist (rotation around the bone's long
+        /// axis) is captured before the solve and restored afterwards. This
+        /// preserves the user's wrist twist (e.g. from a VR controller's
+        /// rotation) which a naive IK would overwrite. Default: true.
+        /// </summary>
+        public bool PreserveTipTwist = true;
+
+        /// <summary>
+        /// Frame delta supplied by the caller for time-dependent smoothing
+        /// (bend-normal filter). Defaults to 1/90 s for Edit-mode safety.
+        /// Set from <see cref="UnityEngine.Time.deltaTime"/> in Play mode.
+        /// </summary>
+        public float DeltaTime = 1f / 90f;
 
         public Vector3 TargetPosition
         {
@@ -108,12 +136,10 @@ namespace NYIK.Solvers
             m_UpperLength = m_Root.Length;
             m_LowerLength = m_Mid.Length;
 
-            // Cache initial local rotations
             m_RootInitialLocalRot = m_Root.Transform.localRotation;
             m_MidInitialLocalRot = m_Mid.Transform.localRotation;
             m_TipInitialLocalRot = m_Tip.Transform.localRotation;
 
-            // Bone local axes (parent-to-child direction expressed in local space)
             m_RootLocalAxis = Quaternion.Inverse(m_Root.Transform.rotation)
                 * (m_Mid.Transform.position - m_Root.Transform.position).normalized;
             m_MidLocalAxis = Quaternion.Inverse(m_Mid.Transform.rotation)
@@ -128,78 +154,117 @@ namespace NYIK.Solvers
             var midT = m_Mid.Transform;
             var tipT = m_Tip.Transform;
 
-            Vector3 rootPos = rootT.position;
-            Vector3 midPos = midT.position;
-            Vector3 tipPos = tipT.position;
+            // Snapshot original rotations so we can Slerp back at end with Weight.
+            Quaternion originalRoot = rootT.rotation;
+            Quaternion originalMid = midT.rotation;
+            Quaternion originalTip = tipT.rotation;
+
+            // Capture tip twist around the current mid→tip axis BEFORE we move bones.
+            Vector3 origTipAxis = (tipT.position - midT.position);
+            Quaternion savedTipTwist = Quaternion.identity;
+            if (PreserveTipTwist && origTipAxis.sqrMagnitude > 1e-8f)
+            {
+                SwingTwistDecomposition.Decompose(originalTip, origTipAxis.normalized,
+                    out _, out savedTipTwist);
+            }
 
             // Distance to target
-            Vector3 toTarget = m_TargetPosition - rootPos;
+            Vector3 toTarget = m_TargetPosition - rootT.position;
             float targetDist = toTarget.magnitude;
+            if (targetDist < 1e-4f) return;
 
-            if (targetDist < 0.0001f)
-                return;
-
-            // Clamp to reachable range
             float maxReach = m_UpperLength + m_LowerLength;
-            float clampedDist = Mathf.Clamp(targetDist, Mathf.Abs(m_UpperLength - m_LowerLength) * 1.001f, maxReach * 0.999f);
+            float clampedDist = Mathf.Clamp(targetDist,
+                Mathf.Abs(m_UpperLength - m_LowerLength) * 1.001f,
+                maxReach * 0.999f);
             Vector3 targetDir = toTarget / targetDist;
 
-            // Analytically compute the world position of the mid joint (elbow/knee)
-            Vector3 midGoal = CalculateMidPosition(rootPos, targetDir, clampedDist);
+            // Analytical mid position from Law of Cosines + bend plane.
+            Vector3 midGoal = CalculateMidPosition(rootT.position, targetDir, clampedDist);
 
-            // --- Root bone rotation ---
-            // Align the current root->mid vector to the computed root->midGoal vector
-            Vector3 currentRootToMid = midPos - rootPos;
-            Vector3 desiredRootToMid = midGoal - rootPos;
+            // ---- Apply FULL strength rotations (Slerp back to original at end) ----
 
-            if (currentRootToMid.sqrMagnitude > 0.0001f && desiredRootToMid.sqrMagnitude > 0.0001f)
+            // Root: align root→mid to root→midGoal
+            Vector3 currentRootToMid = midT.position - rootT.position;
+            Vector3 desiredRootToMid = midGoal - rootT.position;
+            if (currentRootToMid.sqrMagnitude > 1e-8f && desiredRootToMid.sqrMagnitude > 1e-8f)
             {
-                Quaternion rootCorrection = Quaternion.FromToRotation(currentRootToMid, desiredRootToMid);
-                rootT.rotation = Quaternion.Slerp(rootT.rotation, rootCorrection * rootT.rotation, Weight);
+                Quaternion rootCorrection = QuaternionMath.FromToRotationStable(
+                    currentRootToMid, desiredRootToMid);
+                rootT.rotation = rootCorrection * rootT.rotation;
             }
 
-            // After rotating root, mid/tip world positions change -> re-fetch
-            midPos = midT.position;
-            tipPos = tipT.position;
+            // After root rotates, mid/tip moved — re-fetch positions.
+            Vector3 midPosAfterRoot = midT.position;
+            Vector3 tipPosAfterRoot = tipT.position;
 
-            // --- Mid bone rotation ---
-            // Align the current mid->tip vector to the mid->target direction
-            Vector3 currentMidToTip = tipPos - midPos;
-            Vector3 desiredMidToTip = m_TargetPosition - midPos;
-
-            if (currentMidToTip.sqrMagnitude > 0.0001f && desiredMidToTip.sqrMagnitude > 0.0001f)
+            // Mid: align mid→tip to mid→target
+            Vector3 currentMidToTip = tipPosAfterRoot - midPosAfterRoot;
+            Vector3 desiredMidToTip = m_TargetPosition - midPosAfterRoot;
+            if (currentMidToTip.sqrMagnitude > 1e-8f && desiredMidToTip.sqrMagnitude > 1e-8f)
             {
-                Quaternion midCorrection = Quaternion.FromToRotation(currentMidToTip, desiredMidToTip);
-                midT.rotation = Quaternion.Slerp(midT.rotation, midCorrection * midT.rotation, Weight);
+                Quaternion midCorrection = QuaternionMath.FromToRotationStable(
+                    currentMidToTip, desiredMidToTip);
+                midT.rotation = midCorrection * midT.rotation;
             }
 
-            // --- Tip bone rotation (wrist/ankle) ---
+            // Tip: target rotation (only if rotation weight > 0)
+            Quaternion solvedTip = tipT.rotation;
             if (m_RotationWeight > 0f)
             {
-                float effectiveWeight = m_RotationWeight * Weight;
-                tipT.rotation = Quaternion.Slerp(tipT.rotation, m_TargetRotation, effectiveWeight);
+                solvedTip = QuaternionMath.SafeSlerp(tipT.rotation, m_TargetRotation, m_RotationWeight);
+                tipT.rotation = solvedTip;
+            }
+
+            // Restore tip twist around the new mid→tip axis. The user's
+            // controller twist is preserved; only swing is replaced by IK.
+            if (PreserveTipTwist && origTipAxis.sqrMagnitude > 1e-8f)
+            {
+                Vector3 newTipAxis = (tipT.position - midT.position);
+                if (newTipAxis.sqrMagnitude > 1e-8f)
+                {
+                    newTipAxis.Normalize();
+                    SwingTwistDecomposition.Decompose(tipT.rotation, newTipAxis,
+                        out var swing, out _);
+                    // Build axis-aligned saved twist (re-expressed on the new axis).
+                    // Since the twist is a rotation around the bone axis, "saved"
+                    // and "new" axes differ only slightly; we project savedTipTwist's
+                    // angle onto the new axis.
+                    savedTipTwist.ToAngleAxis(out float twistAngle, out Vector3 twistAxis);
+                    if (twistAxis.sqrMagnitude > 1e-6f &&
+                        Vector3.Dot(twistAxis, origTipAxis.normalized) < 0f)
+                    {
+                        twistAngle = -twistAngle;
+                    }
+                    if (twistAngle > 180f) twistAngle -= 360f;
+                    var reExpressedTwist = Quaternion.AngleAxis(twistAngle, newTipAxis);
+                    tipT.rotation = swing * reExpressedTwist;
+                }
+            }
+
+            // ---- Slerp back to original with Weight (unified blend) ----
+            if (Weight < 1f - 1e-4f)
+            {
+                rootT.rotation = QuaternionMath.SafeSlerp(originalRoot, rootT.rotation, Weight);
+                midT.rotation = QuaternionMath.SafeSlerp(originalMid, midT.rotation, Weight);
+                tipT.rotation = QuaternionMath.SafeSlerp(originalTip, tipT.rotation, Weight);
             }
         }
 
         /// <summary>
         /// Computes the world position of the mid joint using the law of cosines and the bend plane.
-        /// Controls the elbow/knee bend direction stably via the bend goal.
         /// </summary>
         Vector3 CalculateMidPosition(Vector3 rootPos, Vector3 targetDir, float targetDist)
         {
-            // Law of cosines: projection distance from root to mid along the target axis
             float cosRootAngle = (targetDist * targetDist + m_UpperLength * m_UpperLength - m_LowerLength * m_LowerLength)
                 / (2f * targetDist * m_UpperLength);
             cosRootAngle = Mathf.Clamp(cosRootAngle, -1f, 1f);
             float rootAngle = Mathf.Acos(cosRootAngle);
 
-            // Along-axis and perpendicular components of the mid position
             float along = Mathf.Cos(rootAngle) * m_UpperLength;
             float perp = Mathf.Sin(rootAngle) * m_UpperLength;
 
-            // Compute a stable bend plane normal
             Vector3 bendDir = GetStableBendDirection(rootPos, targetDir);
-
             return rootPos + targetDir * along + bendDir * perp;
         }
 
@@ -213,20 +278,16 @@ namespace NYIK.Solvers
 
             if (m_BendGoalWeight > 0f)
             {
-                // Compute the direction perpendicular to the target axis from the bend goal
                 Vector3 toGoal = m_BendGoalPosition - rootPos;
-                // Remove the projection onto the target axis
                 bendDir = toGoal - Vector3.Dot(toGoal, targetDir) * targetDir;
 
-                if (bendDir.sqrMagnitude < 0.0001f)
+                if (bendDir.sqrMagnitude < 1e-8f)
                 {
-                    // Bend goal lies on the target axis -> use previous frame or default
                     bendDir = GetFallbackBendDirection(targetDir);
                 }
                 else
                 {
                     bendDir.Normalize();
-                    // If bend goal weight is less than 1, blend with fallback
                     if (m_BendGoalWeight < 1f)
                     {
                         Vector3 fallback = GetFallbackBendDirection(targetDir);
@@ -239,50 +300,40 @@ namespace NYIK.Solvers
                 bendDir = GetFallbackBendDirection(targetDir);
             }
 
-            // Maintain continuity with the previous frame (prevent sudden flipping)
             if (m_HasPrevBendNormal)
             {
                 if (Vector3.Dot(bendDir, m_PrevBendNormal) < 0f)
-                    bendDir = -bendDir; // Prevent inversion
+                    bendDir = -bendDir;
 
-                // Frame-rate independent smoothing: interpolate with previous frame to suppress jitter
-                float alpha = 1f - Mathf.Exp(-Time.deltaTime * 20f);
+                // Frame-rate independent smoothing via caller-supplied dt.
+                float alpha = 1f - Mathf.Exp(-DeltaTime * 20f);
                 bendDir = Vector3.Slerp(m_PrevBendNormal, bendDir, alpha).normalized;
             }
 
             m_PrevBendNormal = bendDir;
             m_HasPrevBendNormal = true;
-
             return bendDir;
         }
 
-        /// <summary>
-        /// Fallback bend direction when the bend goal is absent or invalid.
-        /// </summary>
         Vector3 GetFallbackBendDirection(Vector3 targetDir)
         {
             if (m_HasPrevBendNormal)
             {
-                // Reuse the previous frame's direction (stability first)
                 Vector3 reprojected = m_PrevBendNormal - Vector3.Dot(m_PrevBendNormal, targetDir) * targetDir;
-                if (reprojected.sqrMagnitude > 0.0001f)
+                if (reprojected.sqrMagnitude > 1e-8f)
                     return reprojected.normalized;
             }
 
-            // First frame: derive from the current mid joint position
             if (m_Mid != null && m_Mid.IsValid && m_Root != null && m_Root.IsValid)
             {
                 Vector3 rootToMid = m_Mid.Transform.position - m_Root.Transform.position;
                 Vector3 projected = rootToMid - Vector3.Dot(rootToMid, targetDir) * targetDir;
-                if (projected.sqrMagnitude > 0.0001f)
+                if (projected.sqrMagnitude > 1e-8f)
                     return projected.normalized;
             }
 
-            // Final fallback
-            Vector3 fallback = Vector3.Cross(targetDir, Vector3.up);
-            if (fallback.sqrMagnitude < 0.0001f)
-                fallback = Vector3.Cross(targetDir, Vector3.forward);
-            return fallback.normalized;
+            // Final fallback: stable perpendicular
+            return QuaternionMath.StablePerpendicular(targetDir);
         }
     }
 }

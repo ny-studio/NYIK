@@ -99,15 +99,17 @@ namespace NYIK.VR
                 m_AvatarScale = userHeadHeight / m_AvatarHeadHeight;
             }
 
-            // Arm length ratio (when both hand controllers are active)
+            // Arm span ratio (when both hand controllers are active). Use the
+            // distance between the two hand targets as the user's arm span —
+            // previously this read head→left-hand which is not arm length at
+            // all and was off by ~2x for any T-pose stance.
             if (leftHandTarget.IsTracking && rightHandTarget.IsTracking && m_AvatarArmSpan > 0f)
             {
-                float userArmLength = Vector3.Distance(
-                    headTarget.Position,
-                    leftHandTarget.Position
+                float userArmSpan = Vector3.Distance(
+                    leftHandTarget.Position,
+                    rightHandTarget.Position
                 );
-                // Pure arm length with shoulder width subtracted
-                m_ArmLengthRatio = userArmLength / m_AvatarArmSpan;
+                m_ArmLengthRatio = userArmSpan / m_AvatarArmSpan;
             }
 
             // Calculate offset from HMD to head bone
@@ -135,9 +137,13 @@ namespace NYIK.VR
             if (m_AvatarScale > 0f && m_AvatarScale != 1f)
             {
                 m_NYIKHumanoid.transform.localScale = Vector3.one * m_AvatarScale;
+                // Re-apply offsets with the new scale so HeadPositionOffset etc.
+                // stay anatomically correct after a rescale.
+                m_NYIKHumanoid.ApplyOffsets();
             }
 
-            // Apply head position offset
+            // Apply head position offset (spine offset is in world units; do not
+            // re-scale here since it was computed at the current avatar scale).
             m_NYIKHumanoid.HeadTarget.PositionOffset = m_SpineOffset;
         }
 

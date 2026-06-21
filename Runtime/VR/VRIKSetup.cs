@@ -36,10 +36,15 @@ namespace NYIK.VR
         void Start()
         {
             if (m_NYIKHumanoid == null)
-                m_NYIKHumanoid = FindAnyObjectByType<NYIKHumanoid>();
+                m_NYIKHumanoid = GetComponentInParent<NYIKHumanoid>(true)
+                    ?? GetComponentInChildren<NYIKHumanoid>(true);
 
             if (m_NYIKHumanoid == null)
+            {
+                Debug.LogWarning("[VRIKSetup] NYIKHumanoid is not assigned and was not " +
+                                 "found in this hierarchy. Wire it via the Inspector.", this);
                 return;
+            }
 
             // Override with specified sources
             if (m_HeadSource != null)

@@ -26,6 +26,23 @@ namespace NYIK.Solvers
         float[] m_BoneWeights;
         Vector3[] m_InitialBoneDirs;
 
+        // Per-joint cone constraint (Aristidou & Lasenby 2017). When non-null,
+        // each iteration projects the (parent→child) direction into a swing
+        // cone around the joint's rest direction. Index i constrains the
+        // direction from bone[i] to bone[i+1] — i.e. limits bone[i+1]'s
+        // deviation from rest pose.
+        float[] m_PerJointSwingMaxDeg;
+        Vector3[] m_RestBoneDirsWorld;
+
+        /// <summary>
+        /// When true, applies a per-joint swing-cone constraint each iteration
+        /// (Constrained FABRIK, Aristidou & Lasenby 2017). Requires
+        /// <see cref="SetSwingConstraints"/> to be called with per-joint
+        /// max swing angles (degrees from rest). Default: false (matches
+        /// classic FABRIK).
+        /// </summary>
+        public bool ApplyConstraints = false;
+
         /// <summary>
         /// IK target position (the goal the end of the chain should reach).
         /// </summary>
@@ -70,6 +87,16 @@ namespace NYIK.Solvers
             m_BoneWeights = weights;
         }
 
+        /// <summary>
+        /// Configure per-joint swing cone limits (in degrees). Index i
+        /// constrains the direction from chain bone i to bone i+1. Pass null
+        /// to disable. Array length must be <see cref="IKChain.BoneCount"/> - 1.
+        /// </summary>
+        public void SetSwingConstraints(float[] perJointSwingMaxDeg)
+        {
+            m_PerJointSwingMaxDeg = perJointSwingMaxDeg;
+        }
+
         public override bool IsValid()
         {
             return m_Chain != null && m_Chain.IsValid();
@@ -109,10 +136,40 @@ namespace NYIK.Solvers
             var bones = m_Chain.Bones;
             int dirCount = count - 1;
             m_InitialBoneDirs = new Vector3[dirCount];
+            m_RestBoneDirsWorld = new Vector3[dirCount];
             for (int i = 0; i < dirCount; i++)
             {
                 Vector3 worldDir = (bones[i + 1].Position - bones[i].Position).normalized;
                 m_InitialBoneDirs[i] = Quaternion.Inverse(bones[i].Rotation) * worldDir;
+                m_RestBoneDirsWorld[i] = worldDir;
+            }
+        }
+
+        /// <summary>
+        /// Constrained FABRIK (Aristidou & Lasenby 2017): after each forward
+        /// or backward pass, project each (parent → child) direction into a
+        /// swing cone around the rest direction. Cheap, deterministic, and
+        /// converges in fewer iterations than post-hoc ROM clamping.
+        /// </summary>
+        void ApplySwingConstraints(int count)
+        {
+            if (!ApplyConstraints || m_PerJointSwingMaxDeg == null || m_RestBoneDirsWorld == null) return;
+            int n = Mathf.Min(m_PerJointSwingMaxDeg.Length, count - 1);
+            for (int i = 0; i < n; i++)
+            {
+                float maxDeg = m_PerJointSwingMaxDeg[i];
+                if (maxDeg <= 0f) continue;
+                Vector3 from = m_Positions[i + 1] - m_Positions[i];
+                float lenSqr = from.sqrMagnitude;
+                if (lenSqr < 1e-8f) continue;
+                Vector3 currentDir = from / Mathf.Sqrt(lenSqr);
+                Vector3 rest = m_RestBoneDirsWorld[i];
+                float angle = Vector3.Angle(currentDir, rest);
+                if (angle <= maxDeg) continue;
+                // Project current direction onto the cone surface around rest
+                float t = maxDeg / angle;
+                Vector3 constrained = Vector3.Slerp(rest, currentDir, t).normalized;
+                m_Positions[i + 1] = m_Positions[i] + constrained * m_BoneLengths[i];
             }
         }
 
@@ -168,6 +225,11 @@ namespace NYIK.Solvers
                         float len = m_BoneLengths[i - 1];
                         m_Positions[i] = m_Positions[i - 1] + dir * len;
                     }
+
+                    // Constraint pass — projects any joint outside its swing
+                    // cone back to the cone surface. Allows the next iteration
+                    // to re-converge to the (possibly approximate) target.
+                    ApplySwingConstraints(count);
                 }
             }
 
@@ -190,7 +252,7 @@ namespace NYIK.Solvers
                 // Transform the cached local direction to world space using the current rotation
                 Vector3 currentBoneDir = bones[i].Rotation * m_InitialBoneDirs[i];
 
-                Quaternion correction = Quaternion.FromToRotation(currentBoneDir, desiredDir.normalized);
+                Quaternion correction = QuaternionMath.FromToRotationStable(currentBoneDir, desiredDir.normalized);
                 float boneWeight = m_BoneWeights[i] * Weight;
                 bones[i].Rotation = Quaternion.Slerp(
                     bones[i].Rotation,

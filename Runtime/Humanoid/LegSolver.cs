@@ -33,6 +33,23 @@ namespace NYIK.Humanoid
         Vector3 m_FootTargetPosition;
         bool m_UseCustomTarget;
 
+        Vector3 m_ExternalBendGoal;
+        bool m_HasExternalBendGoal;
+
+        /// <summary>
+        /// Override the knee bend-goal position. Used by the estimator
+        /// pipeline (KneeBendGoalEstimator) to give the leg IK a stable
+        /// "knee points here" hint instead of LegSolver's internal default.
+        /// Call <see cref="ClearExternalBendGoal"/> to restore the default.
+        /// </summary>
+        public void SetExternalBendGoal(Vector3 worldPos)
+        {
+            m_ExternalBendGoal = worldPos;
+            m_HasExternalBendGoal = true;
+        }
+
+        public void ClearExternalBendGoal() => m_HasExternalBendGoal = false;
+
         /// <summary>
         /// Leg solver weight.
         /// </summary>
@@ -129,6 +146,9 @@ namespace NYIK.Humanoid
         /// Solves IK.
         /// </summary>
         /// <param name="pelvisPosition">Current pelvis position (received from SpineSolver).</param>
+        /// <summary>Same role as <see cref="ArmSolver.DeltaTime"/>.</summary>
+        public float DeltaTime { get; set; } = 1f / 90f;
+
         public void Solve(Vector3 pelvisPosition)
         {
             if (!m_Initialized || m_Weight <= 0f)
@@ -152,13 +172,21 @@ namespace NYIK.Humanoid
                 footTarget.y = pelvisPosition.y - m_LegLength + m_FootGroundOffset;
             }
 
-            // Update knee bend goal every frame (body's forward direction)
-            if (m_Thigh.IsValid && m_Root != null)
+            // Update knee bend goal — prefer the externally-supplied one
+            // (KneeBendGoalEstimator); fall back to body-forward heuristic.
+            if (m_HasExternalBendGoal)
+            {
+                m_IKSolver.BendGoalPosition = m_ExternalBendGoal;
+            }
+            else if (m_Thigh.IsValid && m_Root != null)
+            {
                 m_IKSolver.BendGoalPosition = m_Thigh.Position + (bodyRot * Vector3.forward) * 0.5f;
+            }
 
             m_IKSolver.TargetPosition = footTarget;
             m_IKSolver.TargetRotation = m_Foot.Rotation;
             m_IKSolver.Weight = m_Weight;
+            m_IKSolver.DeltaTime = DeltaTime;
             m_IKSolver.Solve();
         }
 
