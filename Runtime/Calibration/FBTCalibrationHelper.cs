@@ -40,6 +40,9 @@ namespace NYIK.Calibration
         [SerializeField] private NYIKHumanoid _nyikHumanoid;
         [Tooltip("T-pose/I-pose キャリブ時に身長スケールも併せて計算・適用するか。")]
         [SerializeField] private bool _calibrateScaleWithPose = true;
+        [Tooltip("T-pose/I-pose キャリブ時にハンド回転キャリブ(今のコントローラ向き↔手バインド)も" +
+                 "測り直すか。手がコントローラに対して捻れる問題を、起動 frame-1 でなく既知ポーズで直す。")]
+        [SerializeField] private bool _calibrateHandsWithPose = true;
 
         [Header("Pose Validation")]
         [Tooltip("Refuse to capture calibration unless the current pose passes validation. " +
@@ -137,6 +140,24 @@ namespace NYIK.Calibration
         }
 
         /// <summary>
+        /// ハンド回転キャリブの再アーム。**プレイヤーが中立姿勢(I-pose: 腕を体側に下ろし手のひらは腿向き)で
+        /// 呼ぶこと。** 次の Solve で各腕が「今のコントローラ向き ↔ 手ボーンのバインド向き」を測り直し、
+        /// 起動 frame-1 の脆い自動キャリブで生じた手首の捻れを上書きする(機種非依存)。
+        /// </summary>
+        [ContextMenu("Calibrate Hands (中立姿勢で実行)")]
+        public void CalibrateHands()
+        {
+            if (_nyikHumanoid == null)
+            {
+                Debug.LogWarning("[FBTCalibrationHelper] NYIKHumanoid 未割当でハンドキャリブ不可。", this);
+                return;
+            }
+            _nyikHumanoid.CalibrateHands();
+            Debug.Log("[FBTCalibrationHelper] Hand rotation calibration re-armed " +
+                      "(中立姿勢で手ボーン基準を測り直し)。", this);
+        }
+
+        /// <summary>
         /// Capture tracker→bone offsets at the current pose. Caller is
         /// expected to be in T-pose. Does not save to the ScriptableObject;
         /// call <see cref="SaveCalibration"/> after this.
@@ -166,6 +187,7 @@ namespace NYIK.Calibration
             FBTCalibrator.CalibrateAtTPose(_animator, provider);
             Debug.Log("[FBTCalibrationHelper] T-pose calibration captured.", this);
             if (_calibrateScaleWithPose) CalibrateScale();
+            if (_calibrateHandsWithPose) CalibrateHands();
         }
 
         /// <summary>
@@ -184,6 +206,7 @@ namespace NYIK.Calibration
             FBTCalibrator.CalibrateAtTPose(_animator, provider);
             Debug.Log("[FBTCalibrationHelper] T-pose calibration captured (validation bypassed).", this);
             if (_calibrateScaleWithPose) CalibrateScale();
+            if (_calibrateHandsWithPose) CalibrateHands();
         }
 
         /// <summary>

@@ -585,6 +585,9 @@ namespace NYIK.Humanoid
 
             // Gate: wait for live HMD tracking. Until then the camera is at the rig
             // floor (height ~0) and aligning would snap the rig to a bogus pose.
+            // ASSUMES a Floor/Stage tracking-origin mode (this project is floor-tracked
+            // PCVR). Under a Device origin the camera carries a static ~1.36m offset that
+            // could pass this gate before tracking is live — use Floor/Stage here.
             if (m_HeadSource.position.y - rig.position.y < 0.2f) return;
 
             // 1. Yaw only (never pitch/roll the player): rotate the rig about the HMD
@@ -603,7 +606,25 @@ namespace NYIK.Humanoid
             rig.position += head.position - m_HeadSource.position;
 
             m_RigAligned = true;
+
+            // Defer the first hand-rotation calibration from "frame 1 (XR not yet live)"
+            // to here (HMD tracking confirmed, rig aligned). The arms recapture their
+            // controller↔bind offset on the next Solve with a valid, aligned pose.
+            CalibrateHands();
+
             Debug.Log("[NYIK] XR Origin aligned to avatar head — first-person embodiment.", this);
+        }
+
+        /// <summary>
+        /// 既知ポーズでのハンド回転キャリブの再アーム。プレイヤーが中立姿勢(I-pose 等)で呼ぶと、
+        /// 次の Solve で各腕が「今のコントローラ向き ↔ 手ボーンのバインド向き」を測り直す。
+        /// 起動直後の脆い frame-1 自動キャリブ(XR が立ち上がる前の姿勢を掴む)を上書きでき、
+        /// 機種非依存(実ポーズを測る)。手がコントローラに対して捻れて見えるときに使う。
+        /// </summary>
+        public void CalibrateHands()
+        {
+            m_LeftArm.ResetHandCalibration();
+            m_RightArm.ResetHandCalibration();
         }
 
         /// <summary>

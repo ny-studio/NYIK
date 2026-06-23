@@ -91,9 +91,25 @@ namespace NYIK.Humanoid
         /// <param name="sourceRotation">Current world rotation of the controller.</param>
         public void CalibrateHandRotation(Quaternion sourceRotation)
         {
-            m_HandRotationOffset = Quaternion.Inverse(sourceRotation) * m_HandInitialRotation;
+            m_HandRotationOffset = ComputeHandRotationOffset(sourceRotation, m_HandInitialRotation);
             m_HandCalibrated = true;
         }
+
+        /// <summary>
+        /// 「コントローラ向き ↔ 手ボーンのバインド向き」のオフセットを求める純関数。
+        /// キャリブ瞬間のターゲット回転 <paramref name="targetRotation"/> と手ボーンのバインド
+        /// ワールド回転 <paramref name="handBindRotation"/> から、適用時に手をバインドへ戻すオフセットを返す。
+        /// ヘッドレス特性化テスト可能(回転は決定論的)。
+        /// </summary>
+        public static Quaternion ComputeHandRotationOffset(Quaternion targetRotation, Quaternion handBindRotation)
+            => Quaternion.Inverse(targetRotation) * handBindRotation;
+
+        /// <summary>
+        /// <see cref="ComputeHandRotationOffset"/> で焼き込んだオフセットをターゲット回転へ適用する純関数。
+        /// キャリブ瞬間は手がバインドへ、その後はコントローラの world delta と同じ delta だけ手が回る(1:1 追従)。
+        /// </summary>
+        public static Quaternion ApplyHandRotationOffset(Quaternion targetRotation, Quaternion offset)
+            => targetRotation * offset;
 
         /// <summary>
         /// Resets hand rotation calibration.
@@ -173,15 +189,19 @@ namespace NYIK.Humanoid
             m_IKSolver.Weight = m_Weight;
 
             // Auto-calculate controller-to-hand bone rotation offset on the first frame
+            // it runs. NOTE: this captures whatever pose the controller is in right now,
+            // so the *first* run should be deferred to a known/stable pose. NYIKHumanoid
+            // re-arms this (ResetHandCalibration) once HMD tracking is live and again on
+            // a deliberate "Calibrate Hands" so it isn't latched to a frame-1 garbage pose.
             if (!m_HandCalibrated)
             {
-                m_HandRotationOffset = Quaternion.Inverse(m_IKSolver.TargetRotation) * m_HandInitialRotation;
+                m_HandRotationOffset = ComputeHandRotationOffset(m_IKSolver.TargetRotation, m_HandInitialRotation);
                 m_HandCalibrated = true;
             }
 
             // Calculate rotation with offset applied in a local variable (original property unchanged)
             Quaternion originalTargetRotation = m_IKSolver.TargetRotation;
-            Quaternion adjustedRotation = originalTargetRotation * m_HandRotationOffset;
+            Quaternion adjustedRotation = ApplyHandRotationOffset(originalTargetRotation, m_HandRotationOffset);
 
             // Update bend goal every frame (follows avatar orientation)
             UpdateBendGoal();
