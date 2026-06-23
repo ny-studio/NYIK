@@ -1,4 +1,5 @@
 using UnityEngine;
+using NYIK.Humanoid;
 using NYIK.Tracker;
 
 namespace NYIK.Calibration
@@ -32,6 +33,13 @@ namespace NYIK.Calibration
 
         [Tooltip("Persistent calibration storage. Created via VRH/FBT Calibration Data menu.")]
         [SerializeField] private FBTCalibrationData _calibrationData;
+
+        [Header("Height Scale (philosophy B: shrink targets, avatar fixed)")]
+        [Tooltip("身長スケールを適用する NYIKHumanoid。空なら自動検出。頭+手のみ構成で performer↔avatar の" +
+                 "身長差を UserScale で吸収し、足ターゲット(y=0)が脚長で届く高さに収まる(足の接地不良の根治)。")]
+        [SerializeField] private NYIKHumanoid _nyikHumanoid;
+        [Tooltip("T-pose/I-pose キャリブ時に身長スケールも併せて計算・適用するか。")]
+        [SerializeField] private bool _calibrateScaleWithPose = true;
 
         [Header("Pose Validation")]
         [Tooltip("Refuse to capture calibration unless the current pose passes validation. " +
@@ -77,6 +85,55 @@ namespace NYIK.Calibration
                     }
                 }
             }
+
+            // NYIKHumanoid (for height scale): self / parent / children
+            if (_nyikHumanoid == null)
+            {
+                _nyikHumanoid = GetComponent<NYIKHumanoid>();
+                if (_nyikHumanoid == null) _nyikHumanoid = GetComponentInParent<NYIKHumanoid>();
+                if (_nyikHumanoid == null) _nyikHumanoid = GetComponentInChildren<NYIKHumanoid>();
+            }
+        }
+
+        /// <summary>
+        /// 身長スケール キャリブ(哲学B: ターゲットを縮める・アバター固定)。立位の HMD 頭高とアバター頭高の
+        /// 比から <see cref="FBTCalibrator.ComputeTargetRemapScale"/> を求め <see cref="NYIKHumanoid.UserScale"/>
+        /// に入れる。頭+手のみ構成で performer↔avatar の身長差を吸収し、床スナップした足ターゲット(y=0)が
+        /// アバター脚長で届く高さに骨盤/足を再マップする(= 足が曲がって接地しない問題の根治)。
+        /// **直立して呼ぶこと。トラッカー不要(頭の高さだけ使う)。**
+        /// </summary>
+        [ContextMenu("Calibrate Scale (Height)")]
+        public void CalibrateScale()
+        {
+            if (_nyikHumanoid == null)
+            {
+                Debug.LogWarning("[FBTCalibrationHelper] NYIKHumanoid 未割当でスケールキャリブ不可。", this);
+                return;
+            }
+            var refs = _nyikHumanoid.References;
+            if (refs == null || !refs.IsValid() || refs.Head == null || refs.Root == null)
+            {
+                Debug.LogWarning("[FBTCalibrationHelper] References が無効でスケールキャリブ不可。", this);
+                return;
+            }
+
+            var head = _nyikHumanoid.HeadTarget;
+            head.UpdateTracking();
+            if (!head.IsTracking)
+            {
+                Debug.LogWarning("[FBTCalibrationHelper] 頭が未トラッキングでスケールキャリブ不可(Play中・立位で呼ぶ)。", this);
+                return;
+            }
+
+            // 床基準の頭高。XROrigin の floor offset 未補正のため絶対値は近似だが、比は概ね正しい。
+            float floorY = refs.Root.position.y;
+            float userHeadHeight = head.Position.y - floorY;        // 実プレイヤー頭高
+            float avatarHeadHeight = refs.Head.position.y - floorY; // アバター頭高(現スケール)
+            float scale = FBTCalibrator.ComputeTargetRemapScale(
+                UserScaleMode.Height, userHeadHeight, avatarHeadHeight); // = avatar/user (哲学B)
+            _nyikHumanoid.UserScale = scale;
+            Debug.Log($"[FBTCalibrationHelper] Scale calibrated: userHead={userHeadHeight:F2}m " +
+                      $"avatarHead={avatarHeadHeight:F2}m → UserScale={scale:F3}", this);
         }
 
         /// <summary>
@@ -108,6 +165,7 @@ namespace NYIK.Calibration
             }
             FBTCalibrator.CalibrateAtTPose(_animator, provider);
             Debug.Log("[FBTCalibrationHelper] T-pose calibration captured.", this);
+            if (_calibrateScaleWithPose) CalibrateScale();
         }
 
         /// <summary>
@@ -125,6 +183,7 @@ namespace NYIK.Calibration
             }
             FBTCalibrator.CalibrateAtTPose(_animator, provider);
             Debug.Log("[FBTCalibrationHelper] T-pose calibration captured (validation bypassed).", this);
+            if (_calibrateScaleWithPose) CalibrateScale();
         }
 
         /// <summary>

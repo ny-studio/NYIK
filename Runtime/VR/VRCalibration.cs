@@ -133,14 +133,12 @@ namespace NYIK.VR
             if (!m_IsCalibrated || m_NYIKHumanoid == null)
                 return;
 
-            // Apply scale ratio to avatar
-            if (m_AvatarScale > 0f && m_AvatarScale != 1f)
-            {
-                m_NYIKHumanoid.transform.localScale = Vector3.one * m_AvatarScale;
-                // Re-apply offsets with the new scale so HeadPositionOffset etc.
-                // stay anatomically correct after a rescale.
-                m_NYIKHumanoid.ApplyOffsets();
-            }
+            // Scale: philosophy B (shrink targets, avatar fixed) per nyik_scale_plan.md.
+            // m_AvatarScale = userHeadHeight / avatarHeadHeight (user/avatar); UserScale is the
+            // reciprocal (avatar/user) so the estimator-stage body targets remap into the avatar.
+            // Do NOT write transform.localScale (old philosophy A) — that double-scales with the
+            // prefab scale (Milltina ~1.59) and ApplyOffsets' lossyScale.
+            m_NYIKHumanoid.UserScale = m_AvatarScale > 0f ? 1f / m_AvatarScale : 1f;
 
             // Apply head position offset (spine offset is in world units; do not
             // re-scale here since it was computed at the current avatar scale).
