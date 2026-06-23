@@ -55,6 +55,16 @@ namespace NYIK.Humanoid
         [SerializeField, Range(0f, 0.05f)]
         float m_HeadScaleWhileHidden = 0.001f;
 
+        [Tooltip("一人称憑依: 起動時に XR Origin を一度だけアバター頭ボーンへ整列し、HMD/向きをアバターに重ねる。" +
+                 "NYIK は HMD/コントローラの world 座標をそのまま IK ターゲットにするため、アバター root が " +
+                 "リグから離れて置かれていると全身がリグ位置へ引っ張られて捻れる。これを ON にすると、" +
+                 "アバターをシーンのどこに置いてもプレイヤーがその場で憑依できる(=鏡に自分が映る)。" +
+                 "\n\n⚠️ NPC(他者)を駆動する NYIKHumanoid では OFF のまま。プレイヤーが憑依する 1 体だけ ON。")]
+        [SerializeField] bool m_AlignXROriginToAvatarOnStart;
+
+        // Set once TryAlignRigToAvatar() has run (waits for live HMD tracking).
+        bool m_RigAligned;
+
         [Header("Spine")]
         [SerializeField] SpineSolver m_Spine = new SpineSolver();
 
@@ -553,6 +563,56 @@ namespace NYIK.Humanoid
         }
 
         /// <summary>
+        /// One-shot first-person co-location: yaw + translate the XR Origin so the
+        /// HMD coincides with the avatar's head bone and faces the avatar's forward.
+        /// NYIK feeds the HMD/controllers' WORLD positions straight into the solvers
+        /// as IK targets, so without this an avatar placed away from the rig (e.g.
+        /// Milltina at world (-1.466, 0, 0) while the rig is at the origin) is dragged
+        /// toward the rig's world location — the neck/spine stretch sideways, arms
+        /// splay, legs can't reach: a twisted, inhuman pose. Aligning the rig onto the
+        /// avatar makes the player embody it in place (and see themselves in the mirror).
+        ///
+        /// Runs every frame until the HMD reports a live standing pose (before XR is
+        /// tracking the camera sits at the rig origin), then latches once.
+        /// </summary>
+        void TryAlignRigToAvatar()
+        {
+            if (m_XROrigin == null || m_HeadSource == null) return;
+            var head = m_References?.Head;
+            if (head == null) return;
+
+            Transform rig = m_XROrigin.transform;
+
+            // Gate: wait for live HMD tracking. Until then the camera is at the rig
+            // floor (height ~0) and aligning would snap the rig to a bogus pose.
+            if (m_HeadSource.position.y - rig.position.y < 0.2f) return;
+
+            // 1. Yaw only (never pitch/roll the player): rotate the rig about the HMD
+            //    so the HMD's flattened forward matches the avatar root's forward.
+            //    Rotating about the HMD's own world position keeps the HMD position
+            //    fixed and only changes facing.
+            Vector3 camFwd = Vector3.ProjectOnPlane(m_HeadSource.forward, Vector3.up);
+            Vector3 avatarFwd = Vector3.ProjectOnPlane(transform.forward, Vector3.up);
+            if (camFwd.sqrMagnitude > 1e-6f && avatarFwd.sqrMagnitude > 1e-6f)
+            {
+                float yaw = Vector3.SignedAngle(camFwd.normalized, avatarFwd.normalized, Vector3.up);
+                rig.RotateAround(m_HeadSource.position, Vector3.up, yaw);
+            }
+
+            // 2. Translate the rig so the HMD coincides with the avatar head bone.
+            rig.position += head.position - m_HeadSource.position;
+
+            m_RigAligned = true;
+            Debug.Log("[NYIK] XR Origin aligned to avatar head — first-person embodiment.", this);
+        }
+
+        /// <summary>
+        /// Re-arm the one-shot rig alignment (e.g. after the player recenters or the
+        /// avatar is repositioned). Next Solve() will realign once HMD tracking is live.
+        /// </summary>
+        public void RecalibrateRigAlignment() => m_RigAligned = false;
+
+        /// <summary>
         /// Unified solve pipeline:
         ///   1. Provider tick + VRIK target update (HMD + controllers)
         ///   2. Build <see cref="m_FrameTargets"/> from live trackers + VRIK
@@ -566,6 +626,9 @@ namespace NYIK.Humanoid
         /// </summary>
         void Solve()
         {
+            if (m_AlignXROriginToAvatarOnStart && !m_RigAligned)
+                TryAlignRigToAvatar();
+
             float dt = Time.deltaTime;
             m_TrackerProvider?.Tick(dt);
 
